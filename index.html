@@ -58,25 +58,25 @@
         .color-sweep-card::before {
             content: '';
             position: absolute;
-            top: 0;
-            left: 0;
-            width: 140%;
-            height: 140%;
+            top: 50%;
+            left: 50%;
+            width: 160%;
+            height: 160%;
             pointer-events: none;
-            background: linear-gradient(135deg,
-                transparent 0%,
-                rgba(234, 179, 8, 0.16) 25%,
-                rgba(22, 163, 74, 0.16) 45%,
-                rgba(37, 99, 235, 0.18) 65%,
-                rgba(220, 38, 38, 0.16) 85%,
+            background: radial-gradient(circle at center,
+                rgba(234, 179, 8, 0.18) 0%,
+                rgba(22, 163, 74, 0.16) 28%,
+                rgba(37, 99, 235, 0.16) 54%,
+                rgba(220, 38, 38, 0.12) 72%,
                 transparent 100%);
-            transform: translate(-100%, -100%);
+            transform-origin: center center;
+            transform: translate(-50%, -50%) scale(0);
             animation: colorSweep 5s ease-in-out infinite;
             animation-delay: 0.6s;
         }
         @keyframes colorSweep {
-            0%, 15% { transform: translate(-100%, -100%); }
-            85%, 100% { transform: translate(100%, 100%); }
+            0%, 15% { transform: translate(-50%, -50%) scale(0); }
+            85%, 100% { transform: translate(-50%, -50%) scale(1); }
         }
 
         @media (prefers-reduced-motion: reduce) {
@@ -649,6 +649,71 @@
             URL.revokeObjectURL(url);
         }
 
+        function getImportCell(row, name, fallback = '') {
+            const key = Object.keys(row).find(item =>
+                item.replace(/^\uFEFF/, '').trim().toLowerCase() === name.toLowerCase()
+            );
+            return key === undefined ? fallback : row[key];
+        }
+
+        function normalizeImportDate(value) {
+            if (value instanceof Date && !Number.isNaN(value.getTime())) {
+                return `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, '0')}-${String(value.getDate()).padStart(2, '0')}`;
+            }
+            if (typeof value === 'number' && window.XLSX && XLSX.SSF) {
+                const date = XLSX.SSF.parse_date_code(value);
+                if (date) return `${date.y}-${String(date.m).padStart(2, '0')}-${String(date.d).padStart(2, '0')}`;
+            }
+            const text = String(value || '').trim();
+            let match = text.match(/^(\d{4})[-\/]([0-9]{1,2})[-\/]([0-9]{1,2})/);
+            if (match) return `${match[1]}-${String(match[2]).padStart(2, '0')}-${String(match[3]).padStart(2, '0')}`;
+            match = text.match(/^([0-9]{1,2})[\/-]([0-9]{1,2})[\/-](\d{4})$/);
+            if (match) return `${match[3]}-${String(match[2]).padStart(2, '0')}-${String(match[1]).padStart(2, '0')}`;
+            return text;
+        }
+
+        function parseDelimitedLine(line, separator = ',') {
+            const values = [];
+            let value = '';
+            let quoted = false;
+            for (let i = 0; i < line.length; i += 1) {
+                const char = line[i];
+                if (char === '"' && line[i + 1] === '"' && quoted) {
+                    value += '"';
+                    i += 1;
+                } else if (char === '"') {
+                    quoted = !quoted;
+                } else if (char === separator && !quoted) {
+                    values.push(value.trim());
+                    value = '';
+                } else {
+                    value += char;
+                }
+            }
+            values.push(value.trim());
+            return values;
+        }
+
+        async function readImportRows(file) {
+            if (/\.csv$/i.test(file.name)) {
+                const text = (await file.text()).replace(/^\uFEFF/, '').trim();
+                const lines = text.split(/\r?\n/).filter(line => line.trim());
+                if (!lines.length) return [];
+                const separator = lines[0].includes('\t') ? '\t' : ',';
+                const headers = parseDelimitedLine(lines[0], separator).map(header => header.replace(/^\uFEFF/, '').trim());
+                return lines.slice(1).map(line => {
+                    const values = parseDelimitedLine(line, separator);
+                    return headers.reduce((row, header, index) => {
+                        row[header] = values[index] || '';
+                        return row;
+                    }, {});
+                });
+            }
+            const buffer = await file.arrayBuffer();
+            const workbook = XLSX.read(buffer, { type: 'array', cellDates: true });
+            return XLSX.utils.sheet_to_json(workbook.Sheets[workbook.SheetNames[0]], { defval: '' });
+        }
+
         async function previewMemberFile() {
             const file = document.getElementById('memberFile').files[0];
             const status = document.getElementById('memberImportStatus');
@@ -665,16 +730,14 @@
             }
 
             try {
-                const buffer = await file.arrayBuffer();
-                const workbook = XLSX.read(buffer, { type: 'array' });
-                const rows = XLSX.utils.sheet_to_json(workbook.Sheets[workbook.SheetNames[0]], { defval: '' });
+                const rows = await readImportRows(file);
                 pendingMembers = rows.map(row => ({
-                    norek: String(row.norek || row.Norek || '').trim(),
-                    nis: String(row.nis || row.NIS || '').trim(),
-                    nama: String(row.nama || row.Nama || '').trim(),
-                    kelas: String(row.kelas || row.Kelas || '-').trim(),
-                    role: String(row.role || row.Role || 'siswa').trim().toLowerCase(),
-                    active: String(row.active || row.Active || 'TRUE').trim().toLowerCase() !== 'false'
+                    norek: String(getImportCell(row, 'norek')).trim(),
+                    nis: String(getImportCell(row, 'nis')).trim(),
+                    nama: String(getImportCell(row, 'nama')).trim(),
+                    kelas: String(getImportCell(row, 'kelas', '-')).trim(),
+                    role: String(getImportCell(row, 'role', 'siswa')).trim().toLowerCase(),
+                    active: String(getImportCell(row, 'active', 'TRUE')).trim().toLowerCase() !== 'false'
                 }));
                 const invalid = pendingMembers.filter(row => !row.norek || !row.nis || !row.nama || row.role !== 'siswa');
                 if (!pendingMembers.length || invalid.length) throw new Error(`${invalid.length || 'Tidak ada'} baris tidak valid.`);
@@ -733,21 +796,22 @@
             }
 
             try {
-                const buffer = await file.arrayBuffer();
-                const workbook = XLSX.read(buffer, { type: 'array' });
-                const rows = XLSX.utils.sheet_to_json(workbook.Sheets[workbook.SheetNames[0]], { defval: '' });
+                const rows = await readImportRows(file);
                 pendingTransactions = rows.map(row => ({
-                    norek: String(row.norek || row.Norek || '').trim(),
-                    tanggal: String(row.tanggal || row.Tanggal || '').trim(),
-                    jenis: String(row.jenis || row.Jenis || '').trim().toUpperCase(),
-                    jumlah: String(row.jumlah || row.Jumlah || '').trim(),
-                    keterangan: String(row.keterangan || row.Keterangan || '').trim()
+                    norek: String(getImportCell(row, 'norek')).trim(),
+                    tanggal: normalizeImportDate(getImportCell(row, 'tanggal')),
+                    jenis: String(getImportCell(row, 'jenis')).trim().toUpperCase(),
+                    jumlah: String(getImportCell(row, 'jumlah')).trim(),
+                    keterangan: String(getImportCell(row, 'keterangan')).trim()
                 }));
-                const invalid = pendingTransactions.filter(row =>
-                    !row.norek || !/^\d{4}-\d{2}-\d{2}$/.test(row.tanggal) ||
-                    !['SIMPAN', 'PAKAI'].includes(row.jenis) || !Number.isInteger(Number(row.jumlah)) || Number(row.jumlah) <= 0
+                const invalid = pendingTransactions.map((row, index) => ({ row, index })).filter(item =>
+                    !item.row.norek || !/^\d{4}-\d{2}-\d{2}$/.test(item.row.tanggal) ||
+                    !['SIMPAN', 'PAKAI'].includes(item.row.jenis) || !Number.isInteger(Number(item.row.jumlah)) || Number(item.row.jumlah) <= 0
                 );
-                if (!pendingTransactions.length || invalid.length) throw new Error(`${invalid.length || 'Tidak ada'} baris tidak valid.`);
+                if (!pendingTransactions.length || invalid.length) {
+                    const invalidRows = invalid.slice(0, 10).map(item => item.index + 2).join(', ');
+                    throw new Error(`${invalid.length || 'Tidak ada'} baris tidak valid${invalidRows ? ` (baris ${invalidRows})` : ''}.`);
+                }
                 status.innerText = `${pendingTransactions.length} transaksi siap ditambahkan. Data lama tidak akan dihapus.`;
                 status.classList.add('bg-green-50', 'text-green-700');
                 importButton.classList.remove('hidden');
